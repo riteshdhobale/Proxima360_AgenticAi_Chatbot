@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Proxima360 Chatbot</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+
+        textarea,
+        input[type="text"] {
+            width: 80%;
+            padding: 8px;
+        }
+
+        button {
+            padding: 8px 16px;
+            margin: 4px;
+        }
+
+        #response {
+            margin-top: 20px;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 80%;
+            margin-top: 10px;
+        }
+
+        td,
+        th {
+            border: 1px solid #ccc;
+            padding: 6px;
+            text-align: left;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h2>Proxima360 Allocation Chatbot</h2>
+
+    <input type="text" id="userInput" placeholder="Enter your request">
+    <button onclick="sendMessage()">Send</button>
+
+    <div id="response"></div>
+
+    <script>
+        const backendUrl = "https://93c0ec2fb188.ngrok-free.app";  // Replace with your running ngrok URL
+
+        let pendingSql = null;
+
+        function sendMessage() {
+            const userMessage = document.getElementById("userInput").value;
+            document.getElementById("response").innerHTML = "Loading…";
+            fetch(`${backendUrl}/chat`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ message: userMessage })
+            })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.pending) {
+                        pendingSql = data.sql;
+                        showPreview(data);
+                    } else {
+                        showResult(data.response);
+                    }
+                });
+        }
+
+        function showPreview(data) {
+            const div = document.getElementById("response");
+
+            const current = data.current_values || {};
+            const proposed = data.proposed_values || {};
+
+            // Build comparison table
+            let tableRows = '';
+
+            const fields = [
+                { key: 'SKU_ID', label: 'SKU' },
+                { key: 'Warehouse_ID', label: 'Warehouse' },
+                { key: 'Opening_Stock', label: 'Opening Stock' },
+                { key: 'Stock_In', label: 'Stock In' },
+                { key: 'Stock_Out', label: 'Stock Out' },
+                { key: 'Closing_Stock', label: 'Closing Stock' },
+                { key: 'WOS', label: 'WOS' },
+                { key: 'Min', label: 'Min' },
+                { key: 'Threshold', label: 'Threshold' },
+                { key: 'Max', label: 'Max' },
+                { key: 'Lead_Time_Days', label: 'Lead Time Days' }
+            ];
+
+            fields.forEach(field => {
+                const currentVal = current[field.key] || 'N/A';
+                const proposedVal = proposed[field.key] || currentVal;
+                const isChanged = proposed[field.key] && proposed[field.key] !== currentVal;
+
+                tableRows += `
+            <tr>
+                <td style="border: 1px solid #ccc; padding: 8px;">${field.label}</td>
+                <td style="border: 1px solid #ccc; padding: 8px;">${currentVal}</td>
+                <td style="border: 1px solid #ccc; padding: 8px; ${isChanged ? 'color: green; font-weight: bold;' : ''}">${proposedVal}</td>
+            </tr>
+        `;
+            });
+
+            div.innerHTML = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h3>📦 Allocation Preview</h3>
+            <table style="width:100%; border-collapse: collapse; margin-bottom: 1em;">
+                <thead>
+                    <tr style="background-color: #f2f2f2;">
+                        <th style="border: 1px solid #ccc; padding: 8px;">Field</th>
+                        <th style="border: 1px solid #ccc; padding: 8px;">Current</th>
+                        <th style="border: 1px solid #ccc; padding: 8px;">Proposed</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${tableRows}
+                </tbody>
+            </table>
+            
+            <div style="background: #f0f0f0; padding: 10px; border-radius: 5px; margin: 10px 0;">
+                <strong>SQL Command:</strong><br>
+                <code style="font-family: monospace; font-size: 12px;">${data.sql}</code>
+            </div>
+
+            <p style="text-align: center;">Do you want to confirm this allocation?</p>
+            <div style="text-align: center; font-size: 1.8em;">
+                <button onclick="confirmAllocation()" style="border: none; background: none; cursor: pointer; font-size: 2em;" title="Confirm">
+                    👍
+                </button>
+                <button onclick="declineAllocation()" style="border: none; background: none; cursor: pointer; font-size: 2em;" title="Decline">
+                    👎
+                </button>
+            </div>
+        </div>
+    `;
+        }
+
+        function confirmAllocation() {
+            document.getElementById("response").innerHTML = '<div class="loading">🔄 Executing allocation...</div>';
+
+            fetch(`${backendUrl}/confirm`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ sql: pendingSql })
+            })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        document.getElementById("response").innerHTML =
+                            `<div class="success-message">✅ Allocation confirmed and executed successfully!</div>`;
+                    } else {
+                        document.getElementById("response").innerHTML =
+                            `<div class="error-message">❌ Error: ${data.error}</div>`;
+                    }
+                    pendingSql = null;
+                })
+                .catch(error => {
+                    document.getElementById("response").innerHTML =
+                        `<div class="error-message">❌ Error: ${error.message}</div>`;
+                    pendingSql = null;
+                });
+        }
+
+        function declineAllocation() {
+            document.getElementById("response").innerHTML = `
+        <div class="revision-section">
+            <h3>🔄 Allocation declined</h3>
+            <p>What changes would you like me to make? For example:</p>
+            <ul>
+                <li>Change the stock quantities</li>
+                <li>Modify the warehouse or SKU</li>
+                <li>Update the WOS, Min, Max, or Threshold values</li>
+                <li>Adjust the lead time</li>
+            </ul>
+            <p><strong>Please describe your changes in the input box above and send again.</strong></p>
+        </div>
+    `;
+            pendingSql = null;
+            document.getElementById("userInput").focus();
+        }
+
+        function showResult(result) {
+            const div = document.getElementById("response");
+            if (Array.isArray(result)) {
+                let html = "<table><tr>";
+                Object.keys(result[0] || {}).forEach(k => html += `<th>${k}</th>`);
+                html += "</tr>";
+                result.forEach(row => {
+                    html += "<tr>";
+                    Object.values(row).forEach(v => html += `<td>${v}</td>`);
+                    html += "</tr>";
+                });
+                html += "</table>";
+                div.innerHTML = html;
+            } else {
+                div.innerHTML = `<p>${result}</p>`;
+            }
+        }
+    </script>
+
+</body>
+
+</html>
