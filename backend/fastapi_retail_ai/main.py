@@ -488,66 +488,65 @@ Generate clean SQL for this request:"""
     try:
         result = run_query(sql)
 
-        # Determine analysis type based on the query
+        # Get AI insights for agentic capabilities
         analysis_type = "sales" if "sales_data" in sql.lower() else "inventory"
-
-        # Get comprehensive insights
         insights = await analyze_data_patterns(result, analysis_type)
         smart_recommendations = await generate_smart_recommendations(session_id, result, analysis_type)
         monitoring_data = await proactive_monitoring(session_id)
 
-        # Create intelligent response with actionable insights
-        insight_messages = []
+        # Create intelligent response content
+        base_response = f"Here are the results:"
+
+        # Build AI insights summary
+        ai_insights = []
 
         # Add critical alerts first
         if monitoring_data["critical_alerts"]:
-            insight_messages.append("\n🚨 CRITICAL ALERTS:")
-            # Top 3 most critical
+            ai_insights.append("🚨 **CRITICAL ALERTS:**")
             for alert in monitoring_data["critical_alerts"][:3]:
-                insight_messages.append(
+                ai_insights.append(
                     f"• {alert['message']} - {alert['action_required']}")
 
         # Add immediate actions
         if smart_recommendations["immediate_actions"]:
-            insight_messages.append("\n⚡ IMMEDIATE ACTIONS REQUIRED:")
+            ai_insights.append("\n⚡ **IMMEDIATE ACTIONS:**")
             for action in smart_recommendations["immediate_actions"][:3]:
-                insight_messages.append(
+                ai_insights.append(
                     f"• {action['action']} ({action['priority']} priority) - {action['timeline']}")
 
-        # Add insights and trends
+        # Add business insights
         if insights["alerts"] or insights["trends"]:
-            insight_messages.append("\n📊 BUSINESS INSIGHTS:")
-            for msg in (insights["alerts"] + insights["trends"])[:5]:
-                insight_messages.append(f"• {msg}")
+            ai_insights.append("\n📊 **BUSINESS INSIGHTS:**")
+            for insight in (insights["alerts"] + insights["trends"])[:4]:
+                ai_insights.append(f"• {insight}")
 
         # Add strategic recommendations
         if smart_recommendations["strategic_insights"]:
-            insight_messages.append("\n💡 STRATEGIC RECOMMENDATIONS:")
+            ai_insights.append("\n💡 **STRATEGIC RECOMMENDATIONS:**")
             for insight in smart_recommendations["strategic_insights"][:3]:
-                insight_messages.append(f"• {insight}")
+                ai_insights.append(f"• {insight}")
 
         # Add optimization opportunities
         if smart_recommendations["optimization_opportunities"]:
-            insight_messages.append("\n🎯 OPTIMIZATION OPPORTUNITIES:")
+            ai_insights.append("\n🎯 **OPTIMIZATION OPPORTUNITIES:**")
             for opp in smart_recommendations["optimization_opportunities"][:2]:
-                insight_messages.append(
+                ai_insights.append(
                     f"• {opp['description']} - {opp['suggestion']}")
 
-        # Add performance metrics
+        # Add key metrics
         if insights.get("metrics"):
-            metrics = insights["metrics"]
-            insight_messages.append("\n📈 KEY METRICS:")
-            for key, value in metrics.items():
+            ai_insights.append("\n📈 **KEY METRICS:**")
+            for key, value in insights["metrics"].items():
                 if isinstance(value, (int, float)):
-                    insight_messages.append(
+                    ai_insights.append(
                         f"• {key.replace('_', ' ').title()}: {value}")
 
-        response_content = f"""Query executed successfully. Found {len(result) if isinstance(result, list) else 1} result(s).
-
-🤖 AI ANALYSIS COMPLETE:
-{chr(10).join(insight_messages) if insight_messages else '• No significant patterns detected in this data.'}
-
-💬 Ask me for specific recommendations or say "monitor inventory" for real-time alerts!"""
+        # Combine base response with AI insights
+        if ai_insights:
+            response_content = base_response + \
+                "\n\n🤖 **AI ANALYSIS:**\n" + "\n".join(ai_insights)
+        else:
+            response_content = base_response
 
         # Add assistant response to history
         add_message_to_history(session_id, "assistant",
@@ -560,6 +559,7 @@ Generate clean SQL for this request:"""
             "session_id": session_id,
             "sql": sql,
             "response": result,
+            "ai_insights": response_content,
             "insights": insights,
             "smart_recommendations": smart_recommendations,
             "monitoring_data": monitoring_data,

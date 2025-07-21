@@ -1,11 +1,10 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Bot, User, History, Plus, Moon, Sun, Table, ExternalLink, Eye } from "lucide-react";
+import { Send, Bot, User, History, Plus, Moon, Sun, Table } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { AllocationChart } from "./AllocationChart";
-import { sendChatMessage, confirmAllocation, createNewConversation, ChatMessage, getAllConversations, loadConversation, ConversationSession, getDashboardInsights, optimizeAllocation, predictDemand, startMonitoring } from "../services/chatService";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { sendChatMessage, createNewConversation, ChatMessage, getAllConversations, loadConversation, ConversationSession } from "../services/chatService";
 import { useToast } from "@/hooks/use-toast";
 import { useTheme } from "@/contexts/ThemeContext";
 
@@ -14,15 +13,10 @@ interface Message {
   type: 'user' | 'bot';
   content: string;
   timestamp: Date;
-  hasChart?: boolean;
   quickReplies?: string[];
   data?: any[];
   sql?: string;
-  renderType?: 'text' | 'allocation-preview' | 'data-table';
-  allocationId?: number;
-  // Allocation preview data
-  current_values?: any;
-  proposed_values?: any;
+  renderType?: 'text' | 'data-table';
 }
 
 export const ChatInterface = () => {
@@ -259,7 +253,7 @@ ${dashboardData.urgent_actions?.length ?
 
     try {
       const response = await sendChatMessage(content, sessionId);
-
+      
       // Check if response is a string (error message)
       if (typeof response === 'string') {
         const errorMessage: Message = {
@@ -327,6 +321,7 @@ ${dashboardData.urgent_actions?.length ?
         // Handle conversational responses
         else if (response.is_conversational) {
           botContent = (typeof response.response === 'string') ? response.response : 'Thanks for your message! How can I help you?';
+          // Add contextual quick replies for conversational responses
           quickReplies = [
             'Show inventory status',
             'Get dashboard insights',
@@ -335,9 +330,71 @@ ${dashboardData.urgent_actions?.length ?
           ];
         }
         else {
-          // Use AI insights if available, otherwise use basic response
-          if (response.ai_insights) {
-            botContent = response.ai_insights;
+          // Process regular query response with AI enhancements
+          let hasTableData = false;
+          if (typeof response.response === 'string') {
+            botContent = response.response;
+          } else if (Array.isArray(response.response) && response.response.length > 0) {
+            botContent = formatResponse(response.response);
+            hasTableData = true;
+          } else {
+            botContent = formatResponse(response.response);
+          }
+
+          // Add AI insights to the response
+          if (response.insights || response.smart_recommendations || response.monitoring_data) {
+            botContent += '\n\n🤖 **AI ANALYSIS COMPLETE:**\n';
+
+            // Add critical alerts
+            if (response.monitoring_data?.critical_alerts?.length) {
+              botContent += '\n🚨 **CRITICAL ALERTS:**\n';
+              response.monitoring_data.critical_alerts.slice(0, 3).forEach(alert => {
+                botContent += `• ${alert.message} - ${alert.action_required}\n`;
+              });
+            }
+
+            // Add immediate actions
+            if (response.smart_recommendations?.immediate_actions?.length) {
+              botContent += '\n⚡ **IMMEDIATE ACTIONS:**\n';
+              response.smart_recommendations.immediate_actions.slice(0, 3).forEach(action => {
+                botContent += `• ${action.action} (${action.priority} priority) - ${action.timeline}\n`;
+              });
+            }
+
+            // Add insights and trends
+            if (response.insights?.alerts?.length || response.insights?.trends?.length) {
+              botContent += '\n📊 **BUSINESS INSIGHTS:**\n';
+              [...(response.insights.alerts || []), ...(response.insights.trends || [])].slice(0, 4).forEach(insight => {
+                botContent += `• ${insight}\n`;
+              });
+            }
+
+            // Add strategic recommendations
+            if (response.smart_recommendations?.strategic_insights?.length) {
+              botContent += '\n💡 **STRATEGIC RECOMMENDATIONS:**\n';
+              response.smart_recommendations.strategic_insights.slice(0, 3).forEach(insight => {
+                botContent += `• ${insight}\n`;
+              });
+            }
+
+            // Add optimization opportunities
+            if (response.smart_recommendations?.optimization_opportunities?.length) {
+              botContent += '\n🎯 **OPTIMIZATION OPPORTUNITIES:**\n';
+              response.smart_recommendations.optimization_opportunities.slice(0, 2).forEach(opp => {
+                botContent += `• ${opp.description} - ${opp.suggestion}\n`;
+              });
+            }
+
+            // Add key metrics
+            if (response.insights?.metrics) {
+              botContent += '\n📈 **KEY METRICS:**\n';
+              Object.entries(response.insights.metrics).forEach(([key, value]) => {
+                if (typeof value === 'number') {
+                  botContent += `• ${key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}: ${value}\n`;
+                }
+              });
+            }
+
             // Enhanced quick replies based on AI analysis
             quickReplies = [
               '🔍 Get More Details',
@@ -347,12 +404,23 @@ ${dashboardData.urgent_actions?.length ?
               '📈 Analyze Trends'
             ];
           } else {
-            // Fallback to basic response
-            botContent = Array.isArray(response.response) && response.response.length > 0
-              ? "Here are the results:"
-              : "No data found for your query.";
+            // Standard quick replies for basic queries
             quickReplies = ['Show SQL query', 'Export data', 'Ask another question'];
           }
+
+          // Create the bot message with table data if available
+          const botMessage: Message = {
+            id: (Date.now() + 1).toString(),
+            type: 'bot',
+            content: botContent,
+            timestamp: new Date(),
+            quickReplies,
+            data: hasTableData && Array.isArray(response.response) ? response.response : undefined,
+            renderType: hasTableData ? 'data-table' : 'text',
+            sql: response.sql
+          };
+
+          setMessages(prev => [...prev, botMessage]);
         }
 
         // Check if response contains table data
@@ -363,9 +431,10 @@ ${dashboardData.urgent_actions?.length ?
           type: 'bot',
           content: botContent,
           timestamp: new Date(),
-          data: hasTableData ? response.response : undefined,
+          data: hasTableData && Array.isArray(response.response) ? response.response : undefined,
           sql: response.sql,
-          renderType: hasTableData ? 'data-table' : 'text',
+          renderType: hasTableData ? 'data-table' : (response.renderType || 'text'),
+          allocationId: response.allocationId,
           quickReplies
         };
         setMessages(prev => [...prev, botMessage]);
