@@ -3,10 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import psycopg2
 import os
+import decimal
 from dotenv import load_dotenv
 import httpx
-from datetime import datetime
-from typing import List, Optional
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Any, Union
+import re
 
 # Load .env variables
 load_dotenv()
@@ -76,9 +78,61 @@ async def generate_sql_from_llama(prompt, user_message):
     print(data)
 
     if 'choices' in data and data['choices']:
-        sql = data['choices'][0]['message']['content'].strip()
-        # Clean unwanted backticks or markdown just in case
-        sql = sql.replace("```sql", "").replace("```", "").strip()
+        response_content = data['choices'][0]['message']['content'].strip()
+
+        # Try to extract SQL from code blocks first
+
+        # Look for SQL in code blocks (```sql ... ```)
+        sql_blocks = re.findall(r'```sql\s*\n(.*?)\n```',
+                                response_content, re.DOTALL | re.IGNORECASE)
+        if sql_blocks:
+            sql = sql_blocks[0].strip()
+            return sql
+
+        # Look for SQL in any code blocks (``` ... ```)
+        code_blocks = re.findall(
+            r'```\s*\n(.*?)\n```', response_content, re.DOTALL)
+        if code_blocks:
+            # Check if it looks like SQL
+            potential_sql = code_blocks[0].strip()
+            if any(keyword in potential_sql.upper() for keyword in ['SELECT', 'UPDATE', 'INSERT', 'DELETE', 'FROM', 'WHERE', 'SET']):
+                return potential_sql
+
+        # If no code blocks, try to extract SQL statements directly
+        # Look for lines that start with SQL keywords
+        lines = response_content.split('\n')
+        sql_lines = []
+        in_sql = False
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Start of SQL statement
+            if any(line.upper().startswith(keyword) for keyword in ['SELECT', 'UPDATE', 'INSERT', 'DELETE', 'WITH']):
+                in_sql = True
+                sql_lines = [line]
+            elif in_sql:
+                # Continue collecting SQL lines
+                if line.endswith(';'):
+                    sql_lines.append(line)
+                    break
+                elif any(keyword in line.upper() for keyword in ['FROM', 'WHERE', 'SET', 'VALUES', 'GROUP BY', 'ORDER BY', 'HAVING', 'JOIN', 'AND', 'OR']):
+                    sql_lines.append(line)
+                else:
+                    # Stop if we hit non-SQL content
+                    if len(sql_lines) > 1:  # We have at least a reasonable SQL statement
+                        break
+
+        if sql_lines:
+            sql = ' '.join(sql_lines)
+            # Clean up any remaining markdown
+            sql = sql.replace("```sql", "").replace("```", "").strip()
+            return sql
+
+        # Fallback: return the original content cleaned up
+        sql = response_content.replace("```sql", "").replace("```", "").strip()
         return sql
     else:
         raise ValueError(f"Unexpected response format: {data}")
@@ -111,8 +165,6 @@ def fix_column_names(sql: str) -> str:
         "Max": '"Max"',
         "lead_time_days": '"Lead_Time_Days"',
         "Lead_Time_Days": '"Lead_Time_Days"',
-        "store_id": '"Store_ID"',
-        "Store_ID": '"Store_ID"',
         "units_sold": '"Units_Sold"',
         "Units_Sold": '"Units_Sold"',
         "sales_data": '"sales_data"',
@@ -124,34 +176,74 @@ def fix_column_names(sql: str) -> str:
         if new_name not in sql:  # Only replace if not already properly quoted
             sql = sql.replace(old_name, new_name)
 
+    # Fix common error: Store_ID should be Warehouse_ID for inventory_data table
+    if '"inventory_data"' in sql and '"Store_ID"' in sql:
+        sql = sql.replace('"Store_ID"', '"Warehouse_ID"')
+
     return sql
 
 
-def run_query(sql: str, fix_quotes: bool = True):
+def run_query(sql: str, fix_quotes: bool = True) -> Union[List[Dict[str, Any]], str]:
+    """Execute a SQL query and return the results with proper type handling."""
     if fix_quotes:
         sql = fix_column_names(sql)
     print(f"Executing SQL: {sql}")
-    conn = psycopg2.connect(DATABASE_URL)
-    cur = conn.cursor()
-    cur.execute(sql)
+
+    conn = None
+    cur = None
     try:
-        rows = cur.fetchall()
-        columns = [desc[0] for desc in cur.description]
-        cur.close()
-        conn.close()
-        return [dict(zip(columns, row)) for row in rows]
-    except psycopg2.ProgrammingError:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute(sql)
+
+        # For SELECT queries
+        if sql.strip().upper().startswith('SELECT'):
+            rows = cur.fetchall()
+            columns = [desc[0] for desc in cur.description]
+
+            # Convert decimal and date types to JSON-serializable formats
+            processed_rows = []
+            for row in rows:
+                processed_row = {}
+                for col, val in zip(columns, row):
+                    if isinstance(val, decimal.Decimal):
+                        processed_row[col] = float(val)
+                    else:
+                        processed_row[col] = val
+                processed_rows.append(processed_row)
+
+            cur.close()
+            conn.close()
+            return processed_rows
+
+        # For non-SELECT queries
         conn.commit()
         cur.close()
         conn.close()
         return "Query executed successfully."
+
+    except psycopg2.Error as e:
+        print(f"Database error: {e}")
+        if conn:
+            conn.rollback()
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+        return f"Error executing query: {str(e)}"
+    except Exception as e:
+        print(f"General error: {e}")
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+        return f"Error: {str(e)}"
 
 
 async def get_current_values(sql: str):
     """Extract current values from database for comparison in preview"""
     try:
         # Extract SKU, Warehouse, and other identifiers from the SQL
-        import re
 
         # More flexible regex to handle both quoted and unquoted column names and values
         sku_match = re.search(
@@ -187,7 +279,6 @@ async def get_current_values(sql: str):
 
 def extract_proposed_values(sql: str):
     """Extract proposed values from the UPDATE SQL statement"""
-    import re
     proposed = {}
 
     # Extract various SET clauses - handle both quoted and unquoted column names
@@ -214,7 +305,6 @@ def extract_proposed_values(sql: str):
 def enhance_update_sql(sql: str, current_values: dict) -> str:
     """Add proper Week filter to UPDATE statements based on current values"""
     if current_values and sql.strip().upper().startswith("UPDATE"):
-        import re
 
         # Get the Week from current values
         week = current_values.get('Week')
@@ -300,68 +390,33 @@ async def chat(req: QueryRequest):
     # Add user message to history
     add_message_to_history(session_id, "user", req.message)
 
-    prompt = """
-You are Proxima360 AI - an advanced agentic AI assistant revolutionizing supply chain and inventory management.
+    prompt = """You are a SQL expert for supply chain inventory management. Generate clean, executable SQL queries based on user requests.
 
-🎯 YOUR MISSION: Transform business operations through intelligent automation, predictive analytics, and proactive decision support.
+DATABASE SCHEMA:
+- "sales_data" table: "Week" DATE, "Store_ID" VARCHAR, "SKU_ID" INTEGER, "Units_Sold" INTEGER  
+- "inventory_data" table: "Week" DATE, "SKU_ID" INTEGER, "Warehouse_ID" VARCHAR, "Opening_Stock" INTEGER, "Stock_In" INTEGER, "Stock_Out" INTEGER, "Closing_Stock" INTEGER, "WOS" NUMERIC, "Min" INTEGER, "Threshold" INTEGER, "Max" INTEGER, "Lead_Time_Days" INTEGER
 
-📊 DATABASE SCHEMA:
-1. "sales_data"("Week" DATE, "Store_ID" VARCHAR, "SKU_ID" INTEGER, "Units_Sold" INTEGER)
-2. "inventory_data"("Week" DATE, "SKU_ID" INTEGER, "Warehouse_ID" VARCHAR, "Opening_Stock" INTEGER,
-   "Stock_In" INTEGER, "Stock_Out" INTEGER, "Closing_Stock" INTEGER, "WOS" FLOAT,
-   "Min" INTEGER, "Threshold" INTEGER, "Max" INTEGER, "Lead_Time_Days" INTEGER)
+CRITICAL RULES:
+1. Always use double quotes around table and column names
+2. Use ILIKE for text comparisons, = for exact numbers
+3. For allocation/update requests, use "inventory_data" table with "Warehouse_ID" (NOT Store_ID)
+4. For sales queries, use "sales_data" table with "Store_ID"
+5. For stock/inventory operations, use "inventory_data" table only
+6. For date operations on Week column, use DATE '2022-06-27' - INTERVAL '7 days' syntax
+7. WOS (Weeks of Supply) is NUMERIC type, not FLOAT
+8. Return ONLY clean SQL - no explanations or markdown
 
-🤖 AGENTIC CAPABILITIES:
-- Proactive Issue Detection: Automatically identify potential stockouts, overstock, and inefficiencies
-- Predictive Analytics: Forecast demand patterns and recommend optimal inventory levels
-- Smart Optimization: Suggest cost-effective allocation strategies and process improvements
-- Learning & Adaptation: Learn from historical patterns to improve recommendations over time
-- Real-time Monitoring: Continuously analyze data for emerging trends and anomalies
-- Business Intelligence: Provide strategic insights that drive competitive advantage
+EXAMPLE QUERIES:
+- Show last week's sales: SELECT * FROM "sales_data" WHERE "Week" >= (DATE '2022-06-27' - INTERVAL '7 days');
+- Show inventory for SKU: SELECT * FROM "inventory_data" WHERE "SKU_ID" = 123456;
+- Show low stock: SELECT * FROM "inventory_data" WHERE "Closing_Stock" < "Min";
 
-🧠 INTELLIGENT BEHAVIOR:
-- When users ask about inventory, proactively check for related risks and opportunities
-- Suggest preventive actions before problems occur
-- Learn from previous allocation decisions to improve future recommendations
-- Provide context-aware insights based on business impact
-- Offer multiple solution options with pros/cons analysis
-- Connect inventory data with sales trends for holistic insights
+EXAMPLES:
+User: "show inventory for SKU 123456" → SELECT * FROM "inventory_data" WHERE "SKU_ID" = 123456;
+User: "allocate 50 units to warehouse A" → UPDATE "inventory_data" SET "Stock_In" = 50 WHERE "SKU_ID" = 123456 AND "Warehouse_ID" ILIKE 'A';
+User: "sales for store 001" → SELECT * FROM "sales_data" WHERE "Store_ID" = '001';
 
-🔍 ANALYTICAL APPROACH:
-- Always analyze trends over time, not just current snapshots
-- Calculate ROI and business impact for recommendations
-- Identify root causes, not just symptoms
-- Predict future scenarios and their implications
-- Compare performance across different warehouses/stores
-- Highlight optimization opportunities and cost savings
-
-💡 CONVERSATION INTELLIGENCE:
-- Remember context from previous interactions in the session
-- Build on previous analyses to provide deeper insights
-- Suggest follow-up questions that uncover hidden issues
-- Proactively offer dashboard insights and monitoring services
-- Guide users toward strategic decision-making
-
-⚡ SPECIAL COMMANDS:
-- "optimize [warehouse]" → Run AI optimization analysis
-- "predict demand [SKU]" → Generate demand forecasting  
-- "monitor inventory" → Activate proactive monitoring
-- "dashboard insights" → Get executive summary
-- "what should I do?" → Get prioritized action recommendations
-
-✅ SQL GENERATION RULES:
-- Always use double quotes around table and column names
-- Use ILIKE for text comparisons, exact matching for SKU_ID numbers
-- Include Week filters for UPDATE operations using recent dates
-- Generate clean SQL without markdown formatting
-- For analysis queries, pull sufficient historical data for trends
-
-🎯 RESPONSE STRATEGY:
-- For queries: Execute immediately and provide intelligent analysis
-- For allocations: Show preview with impact analysis and recommendations
-- For monitoring: Provide proactive alerts and strategic guidance
-- Always end with suggested next steps or follow-up questions
-"""
+Generate clean SQL for this request:"""
 
     ai_response = await generate_sql_from_llama(prompt, req.message)
 
@@ -390,6 +445,17 @@ You are Proxima360 AI - an advanced agentic AI assistant revolutionizing supply 
 
     # If it is SQL, proceed with query execution
     sql = ai_response
+
+    # Process and clean up the SQL
+    sql = sql.replace("DATEADD", "DATE")  # Fix any DATEADD functions
+    sql = sql.replace("day", "days")  # Standardize interval unit
+
+    # Handle specific date patterns
+    if "last week" in req.message.lower():
+        sql = sql.replace(
+            '"Week" >= CURRENT_DATE - 7',
+            '"Week" >= (DATE \'2022-06-27\' - INTERVAL \'7 days\')'
+        )
 
     # Detect write queries
     if sql.strip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
@@ -871,8 +937,8 @@ async def proactive_monitoring(session_id: str) -> dict:
         critical_inventory_query = '''
         SELECT "SKU_ID", "Warehouse_ID", "Closing_Stock", "Min", "WOS", "Week"
         FROM "inventory_data" 
-        WHERE "Closing_Stock" < "Min" * 1.2
-        ORDER BY ("Closing_Stock" / NULLIF("Min", 0)) ASC
+        WHERE CAST("Closing_Stock" AS FLOAT) < CAST("Min" AS FLOAT) * 1.2
+        ORDER BY (CAST("Closing_Stock" AS FLOAT) / NULLIF(CAST("Min" AS FLOAT), 0)) ASC
         LIMIT 10
         '''
 
@@ -887,13 +953,14 @@ async def proactive_monitoring(session_id: str) -> dict:
                 "action_required": "Immediate restock" if severity == "CRITICAL" else "Plan restock"
             })
 
-        # Analyze sales trends for the last few weeks
+        # Simple sales analysis without date intervals
         sales_trend_query = '''
         SELECT "SKU_ID", "Week", SUM("Units_Sold") as total_sold
         FROM "sales_data" 
-        WHERE "Week" >= (SELECT MAX("Week") - INTERVAL '4 weeks' FROM "sales_data")
+        WHERE "Week" >= '2022-06-06'
         GROUP BY "SKU_ID", "Week"
         ORDER BY "SKU_ID", "Week"
+        LIMIT 50
         '''
 
         sales_trends = run_query(sales_trend_query, fix_quotes=False)
@@ -969,6 +1036,17 @@ async def proactive_monitoring(session_id: str) -> dict:
     return monitoring_results
 
 
+@app.get("/test")
+async def test_basic_query():
+    """Test basic database connectivity"""
+    try:
+        test_query = 'SELECT COUNT(*) as total_rows FROM "inventory_data"'
+        result = run_query(test_query, fix_quotes=False)
+        return {"status": "success", "result": result}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
 @app.get("/dashboard/insights")
 async def get_dashboard_insights():
     """Get comprehensive dashboard insights for management"""
@@ -995,7 +1073,7 @@ async def get_dashboard_insights():
             SUM("Units_Sold") as total_sales,
             AVG("Units_Sold") as avg_sales_per_sku
         FROM "sales_data" 
-        WHERE "Week" >= (SELECT MAX("Week") - INTERVAL '1 week' FROM "sales_data")
+        WHERE "Week" >= '2022-06-20'
         '''
 
         sales_metrics = run_query(sales_performance_query, fix_quotes=False)
@@ -1004,7 +1082,7 @@ async def get_dashboard_insights():
         top_performers_query = '''
         SELECT "SKU_ID", SUM("Units_Sold") as total_sold
         FROM "sales_data" 
-        WHERE "Week" >= (SELECT MAX("Week") - INTERVAL '4 weeks' FROM "sales_data")
+        WHERE "Week" >= '2022-06-06'
         GROUP BY "SKU_ID"
         ORDER BY total_sold DESC
         LIMIT 5

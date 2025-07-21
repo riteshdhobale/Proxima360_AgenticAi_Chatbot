@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Bot, User, History, Plus, Moon, Sun } from "lucide-react";
+import { Send, Bot, User, History, Plus, Moon, Sun, Table, ExternalLink, Eye } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { AllocationChart } from "./AllocationChart";
 import { sendChatMessage, confirmAllocation, createNewConversation, ChatMessage, getAllConversations, loadConversation, ConversationSession, getDashboardInsights, optimizeAllocation, predictDemand, startMonitoring } from "../services/chatService";
 import { useToast } from "@/hooks/use-toast";
@@ -17,7 +18,7 @@ interface Message {
   quickReplies?: string[];
   data?: any[];
   sql?: string;
-  renderType?: 'text' | 'allocation-preview';
+  renderType?: 'text' | 'allocation-preview' | 'data-table';
   allocationId?: number;
   // Allocation preview data
   current_values?: any;
@@ -67,6 +68,9 @@ What would you like to explore first?`,
   const [allConversations, setAllConversations] = useState<ConversationSession[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [showConversationList, setShowConversationList] = useState(false);
+  const [allocationLoading, setAllocationLoading] = useState<string | null>(null);
+  const [tableModalData, setTableModalData] = useState<any[] | null>(null);
+  const [isTableModalOpen, setIsTableModalOpen] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const messageRefs = useRef<{ [key: string]: HTMLDivElement | null }>({});
   const { toast } = useToast();
@@ -171,16 +175,72 @@ ${dashboardData.urgent_actions?.length ?
       let formatted = "Here are the results:\n\n";
       formatted += keys.join(" | ") + "\n";
       formatted += keys.map(() => "---").join(" | ") + "\n";
-      const displayData = data.slice(0, 10);
+      const displayData = data.slice(0, 5); // Show only 5 rows in preview
       displayData.forEach(row => {
-        formatted += keys.map(key => row[key] || "").join(" | ") + "\n";
+        formatted += keys.map(key => String(row[key] || "")).join(" | ") + "\n";
       });
-      if (data.length > 10) {
-        formatted += `\n... and ${data.length - 10} more rows`;
+      if (data.length > 5) {
+        formatted += `\n📊 Showing ${displayData.length} of ${data.length} total rows`;
       }
       return formatted;
     }
     return JSON.stringify(data, null, 2);
+  };
+
+  // Enhanced table component for modal
+  const DataTableModal = ({ data, isOpen, onClose }: { data: any[], isOpen: boolean, onClose: () => void }) => {
+    if (!data || data.length === 0) return null;
+
+    const keys = Object.keys(data[0]);
+
+    return (
+      <Dialog open={isOpen} onOpenChange={onClose}>
+        <DialogContent className="max-w-6xl max-h-[80vh] overflow-hidden bg-slate-900 border-slate-700">
+          <DialogHeader className="border-b border-slate-700 pb-4">
+            <DialogTitle className="text-xl font-bold text-white flex items-center gap-2">
+              <Table className="h-5 w-5 text-blue-400" />
+              Complete Data View
+              <span className="text-sm font-normal text-slate-400">({data.length} total rows)</span>
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="overflow-auto max-h-[60vh]">
+            <table className="w-full border-collapse">
+              <thead className="sticky top-0 bg-slate-800 border-b border-slate-600">
+                <tr>
+                  {keys.map((key, index) => (
+                    <th key={index} className="text-left p-3 text-sm font-semibold text-slate-200 border-r border-slate-600 last:border-r-0">
+                      {key}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {data.map((row, rowIndex) => (
+                  <tr key={rowIndex} className={`border-b border-slate-700 hover:bg-slate-800/50 transition-colors ${rowIndex % 2 === 0 ? 'bg-slate-900/50' : 'bg-slate-800/30'
+                    }`}>
+                    {keys.map((key, colIndex) => (
+                      <td key={colIndex} className="p-3 text-sm text-slate-300 border-r border-slate-700 last:border-r-0 font-mono">
+                        {String(row[key] || '')}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex justify-between items-center pt-4 border-t border-slate-700">
+            <span className="text-sm text-slate-400">
+              Total: {data.length} rows × {keys.length} columns
+            </span>
+            <Button onClick={onClose} variant="outline" className="border-slate-600 text-slate-300 hover:bg-slate-700">
+              Close
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    );
   };
 
   const handleSendMessage = async (content: string) => {
@@ -199,6 +259,19 @@ ${dashboardData.urgent_actions?.length ?
 
     try {
       const response = await sendChatMessage(content, sessionId);
+      
+      // Check if response is a string (error message)
+      if (typeof response === 'string') {
+        const errorMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          type: 'bot',
+          content: `❌ Error: ${response}`,
+          timestamp: new Date(),
+          quickReplies: ['Try again', 'Get help']
+        };
+        setMessages(prev => [...prev, errorMessage]);
+        return;
+      }
 
       // Update session ID if it was provided
       if (response.session_id && response.session_id !== sessionId) {
@@ -215,18 +288,32 @@ ${dashboardData.urgent_actions?.length ?
 
       // Check if this is an allocation preview
       if (response.pending && response.preview_message) {
-        const previewMessage: Message = {
+        // Add a brief loading message first
+        const loadingMessage: Message = {
           id: (Date.now() + 1).toString(),
           type: 'bot',
-          content: response.preview_message,
-          timestamp: new Date(),
-          sql: response.sql,
-          renderType: 'allocation-preview',
-          allocationId: Date.now(), // Use timestamp as temp ID
-          current_values: response.current_values,
-          proposed_values: response.proposed_values
+          content: '🔍 Analyzing your request and preparing allocation preview...',
+          timestamp: new Date()
         };
-        setMessages(prev => [...prev, previewMessage]);
+        setMessages(prev => [...prev, loadingMessage]);
+
+        // Small delay to make the flow feel more natural
+        setTimeout(() => {
+          const previewMessage: Message = {
+            id: (Date.now() + 2).toString(),
+            type: 'bot',
+            content: response.preview_message,
+            timestamp: new Date(),
+            sql: response.sql,
+            renderType: 'allocation-preview',
+            allocationId: Date.now(), // Use timestamp as temp ID
+            current_values: response.current_values,
+            proposed_values: response.proposed_values
+          };
+
+          // Replace the loading message with the actual preview
+          setMessages(prev => prev.slice(0, -1).concat(previewMessage));
+        }, 800); // 800ms delay for a smoother experience
       } else {
         // Enhanced AI Response Processing
         let botContent = '';
@@ -250,8 +337,12 @@ ${dashboardData.urgent_actions?.length ?
         }
         else {
           // Process regular query response with AI enhancements
+          let hasTableData = false;
           if (typeof response.response === 'string') {
             botContent = response.response;
+          } else if (Array.isArray(response.response) && response.response.length > 0) {
+            botContent = formatResponse(response.response);
+            hasTableData = true;
           } else {
             botContent = formatResponse(response.response);
           }
@@ -322,16 +413,33 @@ ${dashboardData.urgent_actions?.length ?
             // Standard quick replies for basic queries
             quickReplies = ['Show SQL query', 'Export data', 'Ask another question'];
           }
+
+          // Create the bot message with table data if available
+          const botMessage: Message = {
+            id: (Date.now() + 1).toString(),
+            type: 'bot',
+            content: botContent,
+            timestamp: new Date(),
+            quickReplies,
+            data: hasTableData && Array.isArray(response.response) ? response.response : undefined,
+            renderType: hasTableData ? 'data-table' : 'text',
+            sql: response.sql
+          };
+
+          setMessages(prev => [...prev, botMessage]);
         }
+
+        // Check if response contains table data
+        const hasTableData = Array.isArray(response.response) && response.response.length > 0;
 
         const botMessage: Message = {
           id: (Date.now() + 1).toString(),
           type: 'bot',
           content: botContent,
           timestamp: new Date(),
-          data: Array.isArray(response.response) ? response.response : undefined,
+          data: hasTableData && Array.isArray(response.response) ? response.response : undefined,
           sql: response.sql,
-          renderType: response.renderType || 'text',
+          renderType: hasTableData ? 'data-table' : (response.renderType || 'text'),
           allocationId: response.allocationId,
           quickReplies
         };
@@ -433,6 +541,8 @@ Just ask me anything in natural language!`,
 
   const handleAllocationAction = async (allocationId: number, action: 'approve' | 'reject') => {
     try {
+      setAllocationLoading(`${allocationId}-${action}`);
+
       if (action === 'approve') {
         // Find the message with this allocation ID to get the SQL
         const allocationMessage = messages.find(m => m.allocationId === allocationId);
@@ -503,6 +613,8 @@ Just ask me anything in natural language!`,
         description: "Failed to process allocation action",
         variant: "destructive",
       });
+    } finally {
+      setAllocationLoading(null);
     }
   };
 
@@ -758,7 +870,7 @@ Just ask me anything in natural language!`,
         </div>
 
         {/* Enhanced Chat Messages Area with Professional Spacing */}
-        <div className="flex-1 overflow-y-auto px-8 py-6 space-y-8 bg-gradient-to-b from-slate-900/20 via-slate-900/10 to-slate-900/20 backdrop-blur-sm relative">
+        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4 bg-gradient-to-b from-slate-900/20 via-slate-900/10 to-slate-900/20 backdrop-blur-sm relative">
           {/* Subtle Background Pattern */}
           <div className="absolute inset-0 opacity-20" style={{
             backgroundImage: `radial-gradient(circle at 1px 1px, rgba(255,255,255,0.03) 1px, transparent 0)`,
@@ -779,83 +891,232 @@ Just ask me anything in natural language!`,
               <div className={`max-w-4xl ${message.type === 'user' ? 'order-2' : 'order-1'}`}>
                 <div className={`flex items-start space-x-6 ${message.type === 'user' ? 'flex-row-reverse space-x-reverse' : ''}`}>
                   {/* Enhanced Avatar Design */}
-                  <div className={`w-12 h-12 rounded-3xl flex items-center justify-center shadow-xl backdrop-blur-sm flex-shrink-0 ring-2 transition-all duration-300 group-hover:scale-105 ${message.type === 'user'
+                  <div className={`w-10 h-10 rounded-2xl flex items-center justify-center shadow-lg backdrop-blur-sm flex-shrink-0 ring-2 transition-all duration-300 group-hover:scale-105 ${message.type === 'user'
                     ? 'bg-gradient-to-br from-blue-500 via-blue-600 to-purple-600 ring-blue-400/40'
                     : 'bg-gradient-to-br from-purple-500 via-purple-600 to-indigo-600 ring-purple-400/40'
                     }`}>
                     {message.type === 'user' ? (
-                      <User className="text-white drop-shadow-sm" size={20} />
+                      <User className="text-white drop-shadow-sm" size={18} />
                     ) : (
-                      <Bot className="text-white drop-shadow-sm" size={20} />
+                      <Bot className="text-white drop-shadow-sm" size={18} />
                     )}
                   </div>
-                  <div className={`flex flex-col space-y-4 ${message.type === 'user' ? 'items-end' : 'items-start'}`}>
-                    <Card className={`px-6 py-5 backdrop-blur-xl border-0 shadow-[0_8px_32px_rgba(0,0,0,0.2)] relative overflow-hidden transition-all duration-300 group-hover:shadow-[0_12px_48px_rgba(0,0,0,0.3)] ${message.type === 'user'
-                      ? 'bg-gradient-to-br from-blue-500/25 via-blue-600/20 to-purple-500/25 text-white rounded-[28px] rounded-br-lg'
-                      : 'bg-slate-800/80 text-white border border-slate-700/50 rounded-[28px] rounded-bl-lg'
+                  <div className={`flex flex-col space-y-3 ${message.type === 'user' ? 'items-end' : 'items-start'}`}>
+                    <Card className={`px-4 py-3 backdrop-blur-xl border-0 shadow-[0_4px_20px_rgba(0,0,0,0.15)] relative overflow-hidden transition-all duration-300 group-hover:shadow-[0_8px_32px_rgba(0,0,0,0.25)] max-w-4xl ${message.type === 'user'
+                      ? 'bg-gradient-to-br from-blue-500/25 via-blue-600/20 to-purple-500/25 text-white rounded-[20px] rounded-br-lg'
+                      : 'bg-slate-800/80 text-white border border-slate-700/50 rounded-[20px] rounded-bl-lg'
                       }`}>
                       {/* Enhanced Background Effects */}
-                      <div className="absolute inset-0 bg-gradient-to-br from-white/8 via-white/4 to-transparent pointer-events-none rounded-[28px]"></div>
+                      <div className="absolute inset-0 bg-gradient-to-br from-white/8 via-white/4 to-transparent pointer-events-none rounded-[20px]"></div>
                       {message.renderType === 'allocation-preview' ? (
-                        <div className="space-y-4">
-                          <p className="font-semibold text-primary">{message.content}</p>
+                        <div className="space-y-4 animate-in fade-in slide-in-from-bottom-3 duration-500">
+                          {/* Header with better spacing */}
+                          <div className="border-l-4 border-blue-500 pl-3 py-2 bg-blue-50/50 dark:bg-blue-950/30 rounded-r">
+                            <p className="font-semibold text-blue-700 dark:text-blue-300 text-base">{message.content}</p>
+                            <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">Review the changes below and approve or reject the allocation</p>
+                          </div>
 
-                          {/* Show SQL Query */}
-                          <div className="bg-muted p-3 rounded-md">
-                            <h4 className="font-semibold text-sm text-muted-foreground mb-2">SQL Query to Execute:</h4>
-                            <pre className="text-xs bg-slate-900 dark:bg-slate-800 text-green-400 p-2 rounded overflow-x-auto">
+                          {/* SQL Query with better styling */}
+                          <div className="bg-slate-50 dark:bg-slate-900/50 p-3 rounded border border-slate-200 dark:border-slate-700">
+                            <h4 className="font-semibold text-xs text-slate-700 dark:text-slate-300 mb-2 flex items-center">
+                              <span className="bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 px-2 py-0.5 rounded text-xs mr-2">SQL</span>
+                              Query to Execute:
+                            </h4>
+                            <pre className="text-xs bg-slate-900 dark:bg-slate-800 text-green-400 p-2 rounded overflow-x-auto border border-slate-700">
                               {message.sql}
                             </pre>
                           </div>
 
-                          {/* Show Changes Preview */}
-                          {message.current_values && message.proposed_values && (
-                            <div className="border border-primary/20 rounded-md p-3 bg-primary/5">
-                              <h4 className="font-semibold text-sm text-primary mb-3">Changes Preview:</h4>
-                              <div className="grid grid-cols-2 gap-4 text-xs">
-                                <div>
-                                  <h5 className="font-semibold text-foreground mb-2">Current Values:</h5>
-                                  <div className="space-y-1">
-                                    {Object.entries(message.current_values).map(([key, value]) => (
-                                      <div key={key} className="flex justify-between">
-                                        <span className="text-muted-foreground">{key}:</span>
-                                        <span className="font-mono text-foreground">{String(value)}</span>
+                          {/* Enhanced Changes Preview */}
+                          {message.proposed_values && (
+                            <div className="border-2 border-amber-200 dark:border-amber-800/50 rounded-lg p-4 bg-gradient-to-r from-amber-50/50 to-orange-50/50 dark:from-amber-950/20 dark:to-orange-950/20">
+                              {message.current_values ? (
+                                // Existing allocation - show comparison
+                                <>
+                                  <h4 className="font-bold text-base text-amber-800 dark:text-amber-200 mb-3 flex items-center">
+                                    <span className="bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 px-2 py-1 rounded text-xs mr-2">📊</span>
+                                    Changes Preview
+                                  </h4>
+
+                                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                                    {/* Current Values */}
+                                    <div className="bg-white/60 dark:bg-slate-800/60 p-3 rounded border border-slate-200 dark:border-slate-600">
+                                      <h5 className="font-semibold text-slate-700 dark:text-slate-300 mb-2 flex items-center text-sm">
+                                        <span className="w-2 h-2 bg-blue-500 rounded-full mr-2"></span>
+                                        Current Values
+                                      </h5>
+                                      <div className="space-y-1">
+                                        {Object.entries(message.current_values).map(([key, value]) => (
+                                          <div key={key} className="flex justify-between items-center py-1 px-2 rounded hover:bg-slate-100 dark:hover:bg-slate-700">
+                                            <span className="text-slate-600 dark:text-slate-400 text-sm">{key}:</span>
+                                            <span className="font-mono text-slate-800 dark:text-slate-200 bg-slate-100 dark:bg-slate-700 px-2 py-1 rounded text-xs">
+                                              {String(value)}
+                                            </span>
+                                          </div>
+                                        ))}
                                       </div>
-                                    ))}
-                                  </div>
-                                </div>
-                                <div>
-                                  <h5 className="font-semibold text-destructive mb-2">Proposed Changes:</h5>
-                                  <div className="space-y-1">
-                                    {Object.entries(message.proposed_values).map(([key, value]) => (
-                                      <div key={key} className="flex justify-between bg-destructive/10 px-2 py-1 rounded">
-                                        <span className="text-destructive font-semibold">{key}:</span>
-                                        <span className="font-mono text-destructive">{String(value)}</span>
+                                    </div>
+
+                                    {/* Proposed Changes */}
+                                    <div className="bg-white/60 dark:bg-slate-800/60 p-3 rounded border border-green-200 dark:border-green-800">
+                                      <h5 className="font-semibold text-green-700 dark:text-green-300 mb-2 flex items-center text-sm">
+                                        <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
+                                        Proposed Changes
+                                      </h5>
+                                      <div className="space-y-1">
+                                        {Object.entries(message.proposed_values).map(([key, value]) => (
+                                          <div key={key} className="flex justify-between items-center py-1 px-2 rounded bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800">
+                                            <span className="text-green-700 dark:text-green-300 text-sm">{key}:</span>
+                                            <span className="font-mono text-green-800 dark:text-green-200 bg-green-100 dark:bg-green-900/50 px-2 py-1 rounded text-xs font-bold">
+                                              {String(value)}
+                                            </span>
+                                          </div>
+                                        ))}
                                       </div>
-                                    ))}
+                                    </div>
                                   </div>
-                                </div>
-                              </div>
+                                </>
+                              ) : (
+                                // New allocation - show creation message
+                                <>
+                                  <h4 className="font-bold text-base text-green-800 dark:text-green-200 mb-3 flex items-center">
+                                    <span className="bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 px-2 py-1 rounded text-xs mr-2">✨</span>
+                                    New Allocation
+                                  </h4>
+
+                                  <div className="bg-white/60 dark:bg-slate-800/60 p-3 rounded border border-green-200 dark:border-green-600">
+                                    <p className="text-green-700 dark:text-green-300 mb-2 text-sm">Creating new inventory allocation with these values:</p>
+                                    <div className="space-y-1">
+                                      {Object.entries(message.proposed_values).map(([key, value]) => (
+                                        <div key={key} className="flex justify-between items-center py-1 px-2 rounded bg-green-50 dark:bg-green-950/30">
+                                          <span className="text-green-700 dark:text-green-300 text-sm font-medium">{key}:</span>
+                                          <span className="font-mono text-green-800 dark:text-green-200 bg-green-100 dark:bg-green-900/50 px-2 py-1 rounded text-xs font-bold">
+                                            {String(value)} units
+                                          </span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </>
+                              )}
                             </div>
                           )}
 
-                          {/* Approval Buttons */}
-                          <div className="flex gap-3 mt-4">
-                            <Button
-                              size="sm"
-                              className="bg-green-600 hover:bg-green-700 text-white dark:bg-green-700 dark:hover:bg-green-800"
-                              onClick={() => handleAllocationAction(message.allocationId!, 'approve')}
-                            >
-                              ✅ Approve & Execute
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="destructive"
-                              onClick={() => handleAllocationAction(message.allocationId!, 'reject')}
-                            >
-                              ❌ Reject & Cancel
-                            </Button>
+                          {/* Enhanced Action Buttons */}
+                          <div className="bg-white/80 dark:bg-slate-800/80 p-3 rounded border border-slate-200 dark:border-slate-600">
+                            <div className="flex flex-col sm:flex-row gap-2 justify-center">
+                              <Button
+                                size="default"
+                                disabled={allocationLoading === `${message.allocationId}-approve`}
+                                className="bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white shadow-md hover:shadow-lg transform hover:scale-105 transition-all duration-200 px-6 py-2 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+                                onClick={() => handleAllocationAction(message.allocationId!, 'approve')}
+                              >
+                                {allocationLoading === `${message.allocationId}-approve` ? (
+                                  <>
+                                    <span className="mr-2 animate-spin">⏳</span>
+                                    Processing...
+                                  </>
+                                ) : (
+                                  <>
+                                    <span className="mr-2">✅</span>
+                                    Approve & Execute
+                                    <span className="ml-2">→</span>
+                                  </>
+                                )}
+                              </Button>
+                              <Button
+                                size="default"
+                                disabled={allocationLoading === `${message.allocationId}-reject`}
+                                className="bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white shadow-md hover:shadow-lg transform hover:scale-105 transition-all duration-200 px-6 py-2 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+                                onClick={() => handleAllocationAction(message.allocationId!, 'reject')}
+                              >
+                                {allocationLoading === `${message.allocationId}-reject` ? (
+                                  <>
+                                    <span className="mr-2 animate-spin">⏳</span>
+                                    Processing...
+                                  </>
+                                ) : (
+                                  <>
+                                    <span className="mr-2">❌</span>
+                                    Reject & Cancel
+                                    <span className="ml-2">×</span>
+                                  </>
+                                )}
+                              </Button>
+                            </div>
+                            <p className="text-center text-xs text-slate-500 dark:text-slate-400 mt-2">
+                              Choose carefully - this action will modify your database
+                            </p>
                           </div>
+                        </div>
+                      ) : message.renderType === 'data-table' ? (
+                        <div className="space-y-4">
+                          {/* Enhanced response content */}
+                          <div className="bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-950/30 dark:to-purple-950/30 p-4 rounded-lg border border-blue-200 dark:border-blue-800/50">
+                            <pre className="text-sm leading-relaxed whitespace-pre-wrap font-sans text-slate-800 dark:text-slate-200">
+                              {message.content}
+                            </pre>
+                          </div>
+
+                          {/* Enhanced Preview Table */}
+                          {message.data && message.data.length > 0 && (
+                            <div className="mb-4 overflow-x-auto rounded-lg border border-slate-300 dark:border-slate-600 shadow-sm">
+                              <table className="w-full text-sm border-collapse bg-white dark:bg-slate-800">
+                                <thead>
+                                  <tr className="bg-gradient-to-r from-slate-100 to-slate-200 dark:from-slate-700 dark:to-slate-600">
+                                    {Object.keys(message.data[0]).map((key, index) => (
+                                      <th key={index} className="border-b border-slate-300 dark:border-slate-600 px-4 py-3 text-left font-semibold text-slate-700 dark:text-slate-300 uppercase text-xs tracking-wider">
+                                        {key.replace(/_/g, ' ')}
+                                      </th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {message.data.slice(0, 10).map((row, rowIndex) => (
+                                    <tr key={rowIndex} className={`hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors ${rowIndex % 2 === 0 ? 'bg-white dark:bg-slate-800' : 'bg-slate-50/50 dark:bg-slate-800/50'}`}>
+                                      {Object.values(row).map((value, cellIndex) => (
+                                        <td key={cellIndex} className="border-b border-slate-200 dark:border-slate-700 px-4 py-3 text-slate-600 dark:text-slate-400 font-mono text-xs">
+                                          {value != null ? String(value) : <span className="text-slate-400 dark:text-slate-500">—</span>}
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+
+                              {/* Enhanced "Show More" Section */}
+                              {message.data.length > 10 && (
+                                <div className="bg-gradient-to-r from-slate-50 to-blue-50 dark:from-slate-800 dark:to-blue-900/20 p-4 border-t border-slate-200 dark:border-slate-700">
+                                  <div className="flex items-center justify-between">
+                                    <div className="text-sm text-slate-600 dark:text-slate-400">
+                                      <span className="font-semibold">Showing 10 of {message.data.length} total rows</span>
+                                      <span className="text-xs ml-2 opacity-75">({message.data.length - 10} more available)</span>
+                                    </div>
+                                    <Button
+                                      onClick={() => {
+                                        setTableModalData(message.data);
+                                        setIsTableModalOpen(true);
+                                      }}
+                                      className="bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white px-6 py-2 rounded-lg flex items-center gap-2 shadow-md hover:shadow-lg transition-all duration-200 transform hover:scale-105"
+                                    >
+                                      <Table className="h-4 w-4" />
+                                      <span className="font-medium">View All Data</span>
+                                      <span className="bg-white/20 px-2 py-0.5 rounded text-xs">
+                                        +{message.data.length - 10}
+                                      </span>
+                                    </Button>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* DataTable Modal */}
+                          <DataTableModal
+                            isOpen={isTableModalOpen}
+                            onClose={() => setIsTableModalOpen(false)}
+                            data={tableModalData}
+                          />
                         </div>
                       ) : (
                         <pre className="text-sm leading-relaxed whitespace-pre-wrap font-sans">
