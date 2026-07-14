@@ -23,10 +23,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres.nagzxvpuoagsbrfwgogv:riteshjustin24@aws-0-us-east-2.pooler.supabase.com:6543/postgres?sslmode=require"
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 
