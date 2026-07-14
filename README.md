@@ -1,43 +1,54 @@
 # Proxima360 Retail AI Copilot
 
-A full-stack prototype for asking retail-data questions in natural language. The React interface sends a question to a FastAPI service, which uses an LLM to generate SQL and queries a PostgreSQL-backed retail dataset.
+Agentic retail analytics assistant for asking business questions in natural language and turning them into useful database-backed answers.
 
-> **Prototype status:** This repository is a proof of concept, not a production-ready analytics platform. Do not point it at production data until SQL access controls, authentication, persistence, and observability are in place.
+The project is designed around a practical AI-copilot workflow: a business user asks about inventory, sales, or retail performance; the FastAPI backend prepares the LLM prompt, generates SQL for a constrained retail domain, queries PostgreSQL, and returns an answer through a React interface.
 
-## What it demonstrates
+## Why this project matters
 
-- Natural-language retail analytics workflows
-- LLM-assisted SQL generation for a constrained business domain
-- A React + TypeScript client with a FastAPI backend
-- Demo-friendly local development with configurable services
+Retail teams usually need analysts or dashboards for every new question. Proxima360 explores a faster workflow: ask the system directly, let the AI translate intent into a query, and return a business-readable response.
+
+This is the kind of applied LLM system I want to keep building: not just chat, but AI connected to real workflows, data, APIs, and guardrails.
+
+## Current capabilities
+
+- Natural-language questions over retail-style data.
+- FastAPI backend for chat and analytics workflows.
+- React + TypeScript frontend for a clean copilot experience.
+- LLM-assisted SQL generation for inventory and sales questions.
+- Configurable local development through `.env` files.
+- CI checks for backend syntax, frontend linting, and frontend builds.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  U[Business user] --> F[React + TypeScript UI]
-  F -->|REST| A[FastAPI API]
-  A --> P[Prompt and SQL-generation logic]
-  P --> L[LLM provider]
-  P --> G[SQL validation layer]
-  G --> D[(PostgreSQL retail data)]
-  D --> A
-  A --> F
+  user["Retail operator"] --> ui["React + TypeScript copilot UI"]
+  ui -->|"Chat/API request"| api["FastAPI backend"]
+  api --> prompt["Prompt + intent handling"]
+  prompt --> llm["LLM provider"]
+  llm --> sql["Generated SQL"]
+  sql --> guardrails["SQL safety layer (next milestone)"]
+  guardrails --> db[("PostgreSQL retail data")]
+  db --> answer["Structured results"]
+  answer --> api
+  api --> ui
 ```
 
-## Repository layout
+## Repository structure
 
 ```text
 Proxima360_AgenticAi_Chatbot/
 ├── backend/fastapi_retail_ai/
-│   ├── main.py             # FastAPI API and LLM-to-SQL flow
-│   ├── requirements.txt
-│   └── test_*.py           # manual/integration test scripts
+│   ├── main.py              # FastAPI app and LLM-to-SQL flow
+│   ├── requirements.txt     # Python dependencies
+│   └── .env.example         # Local config template, no real secrets
 ├── frontend/proxima360-ai-dialog-main/
-│   ├── src/                # React UI
+│   ├── src/                 # React UI
 │   └── package.json
-├── Makefile
-└── .github/workflows/ci.yml
+├── .github/workflows/ci.yml # GitHub Actions checks
+├── Makefile                 # Local developer commands
+└── README.md
 ```
 
 ## Quick start
@@ -45,68 +56,80 @@ Proxima360_AgenticAi_Chatbot/
 ### Prerequisites
 
 - Python 3.11+
-- Node.js 18+
-- PostgreSQL (only when not using a mock/demo data path)
-- An LLM provider API key
+- Node.js 20+
+- npm
+- PostgreSQL when connecting to a real database
+- Your own LLM provider API key
 
-### Configure local secrets
+### Configure environment
 
 ```bash
 git clone https://github.com/riteshdhobale/Proxima360_AgenticAi_Chatbot.git
 cd Proxima360_AgenticAi_Chatbot
-
-cp backend/fastapi_retail_ai/.env.example backend/fastapi_retail_ai/.env
-# Add your own TOGETHER_API_KEY and DATABASE_URL. Never commit .env.
+make setup
 ```
 
-### Run the backend
+Then edit:
+
+```text
+backend/fastapi_retail_ai/.env
+frontend/proxima360-ai-dialog-main/.env
+```
+
+Do not commit real `.env` files or API keys.
+
+### Run locally
+
+Use two terminals:
 
 ```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install -r backend/fastapi_retail_ai/requirements.txt
-uvicorn main:app --app-dir backend/fastapi_retail_ai --reload --port 8004
+make backend-dev
 ```
-
-### Run the frontend
 
 ```bash
-cd frontend/proxima360-ai-dialog-main
-npm ci
-npm run dev
+make frontend-dev
 ```
 
-The API is available at `http://127.0.0.1:8004`; FastAPI docs are at `/docs`.
+Backend: `http://127.0.0.1:8004`
+
+Frontend: `http://127.0.0.1:8080`
+
+API docs: `http://127.0.0.1:8004/docs`
 
 ## Quality checks
 
 ```bash
-# Frontend
-cd frontend/proxima360-ai-dialog-main
-npm run lint
-npm run build
-
-# Backend syntax check
-python -m compileall -q backend/fastapi_retail_ai
+make lint
+make build
 ```
 
-CI runs these checks on every push and pull request.
+GitHub Actions runs backend syntax checks plus frontend lint/build checks on push and pull request.
 
-## Security notes
+## Security and engineering notes
 
-- Keep `TOGETHER_API_KEY` and `DATABASE_URL` in local environment files or a secret manager.
-- Use a read-only database role with a tightly scoped schema.
-- Treat LLM-generated SQL as untrusted: parse and allowlist read-only statements before execution.
-- Restrict CORS and add authentication before deployment.
+- Secrets belong in local `.env` files or a secret manager, never in source control.
+- LLM-generated SQL should be treated as untrusted until validated.
+- Production use needs authentication, scoped database roles, CORS restrictions, logging, and query limits.
+- The next major engineering step is a proper SQL safety gateway with schema-aware validation.
 
-## Next high-impact feature
+## High-impact next feature
 
-Build a **safe SQL execution gateway**: schema-aware retrieval, SQL AST validation, query allowlists, row/time limits, result provenance, and a small evaluation suite of business questions. That turns the project from a visually strong prototype into credible applied-LLM engineering.
+Build a safe SQL execution gateway:
+
+- Parse generated SQL into an AST.
+- Allow only read-only statements.
+- Restrict access to approved tables and columns.
+- Add row limits and query timeouts.
+- Return source table and query provenance with every answer.
+- Add an evaluation set of common retail questions.
+
+This would turn the project from a strong AI demo into a more credible applied-LLM system.
 
 ## Roadmap
 
-- [ ] Replace in-memory conversation state with persistent, scoped sessions
-- [ ] Add database migrations and a seed dataset
-- [ ] Add unit/integration tests around SQL safety and API contracts
-- [ ] Containerize frontend, API, and PostgreSQL with Docker Compose
-- [ ] Add tracing, structured logs, and latency/cost metrics
+- [ ] Add safe SQL validation and query allowlists.
+- [ ] Add a seeded demo dataset and database migrations.
+- [ ] Add unit tests for intent handling, SQL generation, and API contracts.
+- [ ] Add Docker Compose for frontend, backend, and PostgreSQL.
+- [ ] Add screenshots, demo GIF, and a short walkthrough video.
+- [ ] Split planner, SQL, analytics, and memory responsibilities into clearer modules.
